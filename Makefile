@@ -3,6 +3,7 @@ build:
 
 leak_check:
 	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz
+	# @printf "some\nthing\nanother\n" | valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz
 
 install: build
 	@cp fz /usr/local/bin/fz

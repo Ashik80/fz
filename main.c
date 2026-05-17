@@ -4,6 +4,8 @@
 #include <sys/ioctl.h>
 #include <signal.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "term_escapes.h"
 #include "term_mode.h"
 
@@ -55,8 +57,9 @@ typedef struct {
     char *prompt;
     char *query;
     FILE *tty;
-    int tty_fd;
     size_t cursor;
+    int tty_fd;
+    int selected;
     int rows;
     int cols;
 } FzState;
@@ -74,9 +77,10 @@ FzState new_fz_state() {
         .query = strdup(query),
         .item_list = new_item_list(),
         .tty = tty,
-        .tty_fd = tty_fd,
         .cursor = cursor,
-        .rows = w.ws_row,
+        .tty_fd = tty_fd,
+        .selected = 0,
+        .rows = w.ws_row - 3,
         .cols = w.ws_col
     };
 }
@@ -97,6 +101,15 @@ void render_fz(FzState *fz_state) {
     // DEBUG print
     // DEBUG print
     fprintf(fz_state->tty, "\n");
+    // print items
+    size_t rows_to_be_printed = fz_state->item_list.count > fz_state->rows ? fz_state->rows : fz_state->item_list.count;
+    for (size_t i = 0; i < rows_to_be_printed; i++) {
+        if (i == fz_state->selected) {
+            fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]);
+        } else {
+            fprintf(fz_state->tty, "  %s\n", fz_state->item_list.items[i]);
+        }
+    }
     fprintf(fz_state->tty, "\033[1;%zuH", fz_state->cursor);
     fflush(fz_state->tty);
 }
@@ -166,6 +179,57 @@ void fz_state_query_remove_from_cursor_to_end(FzState *fz_state) {
     fz_state->query[cursor_index] = '\0';
 }
 
+void fz_state_move_selected_up(FzState *fz_state) {
+    if (fz_state->selected > 0) {
+        fz_state->selected--;
+    }
+}
+
+void fz_state_move_selected_down(FzState *fz_state) {
+    if (fz_state->selected < fz_state->item_list.count) {
+        fz_state->selected++;
+    }
+}
+
+void fz_state_load_items_from_pipe(FzState *fz_state) {
+    char *buf = NULL;
+    size_t buf_len = 0;
+    while (getline(&buf, &buf_len, stdin) != -1) {
+        if (buf[strlen(buf) - 1] == '\n')
+            buf[strlen(buf) - 1] = '\0';
+        item_list_add_item(&fz_state->item_list, strdup(buf));
+    }
+    free(buf);
+}
+
+int is_directory(char *path) {
+    struct stat sb;
+    if (lstat(path, &sb) == -1) {
+        perror("Failed to stat file");
+        return 0;
+    }
+    return S_ISDIR(sb.st_mode);
+}
+
+void fz_state_load_items_from_directory(FzState *fz_state, char *base_dir) {
+    DIR *dir = opendir(base_dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        size_t path_len = strlen(base_dir) + strlen(entry->d_name) + 2;
+        char *path = malloc(path_len);
+        snprintf(path, path_len, "%s/%s", base_dir, entry->d_name);
+        if (is_directory(path)) {
+            fz_state_load_items_from_directory(fz_state, path);
+        } else {
+            item_list_add_item(&fz_state->item_list, strdup(path));
+        }
+        free(path);
+    }
+    closedir(dir);
+}
+
 static FzState fz_state;
 
 void exit_early(int sig) {
@@ -180,6 +244,13 @@ int main() {
     signal(SIGINT, exit_early);
 
     fz_state = new_fz_state();
+
+    if (isatty(STDIN_FILENO)) {
+        fz_state_load_items_from_directory(&fz_state, ".");
+    } else {
+        fz_state_load_items_from_pipe(&fz_state);
+    }
+
     enter_alternate_buffer(fz_state.tty);
     enable_raw_mode(fz_state.tty_fd);
     char c;
@@ -194,7 +265,11 @@ int main() {
             read(fz_state.tty_fd, &c2[0], 1);
             read(fz_state.tty_fd, &c2[1], 1);
             if (c2[0] == '[') {
-                if (c2[1] == 'C') {
+                if (c2[1] == 'A') {
+                    fz_state_move_selected_up(&fz_state);
+                } else if (c2[1] == 'B') {
+                    fz_state_move_selected_down(&fz_state);
+                } else if (c2[1] == 'C') {
                     fz_state_move_cursor_right(&fz_state);
                 } else if (c2[1] == 'D') {
                     fz_state_move_cursor_left(&fz_state);
