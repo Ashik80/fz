@@ -60,7 +60,9 @@ typedef struct {
     size_t cursor;
     int tty_fd;
     int selected;
+    int offset;
     int rows;
+    int rows_to_be_printed;
     int cols;
 } FzState;
 
@@ -80,7 +82,9 @@ FzState new_fz_state() {
         .cursor = cursor,
         .tty_fd = tty_fd,
         .selected = 0,
+        .offset = 0,
         .rows = w.ws_row - 3,
+        .rows_to_be_printed = 0,
         .cols = w.ws_col
     };
 }
@@ -92,24 +96,31 @@ void free_fz_state(FzState *fz_state) {
     fclose(fz_state->tty);
 }
 
-void render_fz(FzState *fz_state) {
-    clear_screen(fz_state->tty);
-    fprintf(fz_state->tty, "%s %s\n", fz_state->prompt, fz_state->query);
-    for (int i = 0; i < fz_state->cols; i++) {
-        fprintf(fz_state->tty, "—");
-    }
-    // DEBUG print
-    // DEBUG print
-    fprintf(fz_state->tty, "\n");
-    // print items
-    size_t rows_to_be_printed = fz_state->item_list.count > fz_state->rows ? fz_state->rows : fz_state->item_list.count;
-    for (size_t i = 0; i < rows_to_be_printed; i++) {
+void fz_state_calculate_rows(FzState *fz_state) {
+    fz_state->rows_to_be_printed = fz_state->item_list.count > fz_state->rows ? fz_state->rows : fz_state->item_list.count;
+}
+
+void fz_state_print_item_list(FzState *fz_state) {
+    for (size_t i = fz_state->offset; i <= fz_state->rows_to_be_printed + fz_state->offset - 1; i++) {
         if (i == fz_state->selected) {
             fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]);
         } else {
             fprintf(fz_state->tty, "  %s\n", fz_state->item_list.items[i]);
         }
     }
+}
+
+void fz_state_print_divider(FzState *fz_state) {
+    for (int i = 0; i < fz_state->cols; i++) {
+        fprintf(fz_state->tty, "—");
+    }
+}
+
+void render_fz(FzState *fz_state) {
+    clear_screen(fz_state->tty);
+    fprintf(fz_state->tty, "%s %s\n", fz_state->prompt, fz_state->query);
+    fz_state_print_divider(fz_state);
+    fz_state_print_item_list(fz_state);
     fprintf(fz_state->tty, "\033[1;%zuH", fz_state->cursor);
     fflush(fz_state->tty);
 }
@@ -181,13 +192,19 @@ void fz_state_query_remove_from_cursor_to_end(FzState *fz_state) {
 
 void fz_state_move_selected_up(FzState *fz_state) {
     if (fz_state->selected > 0) {
+        if (fz_state->offset >= fz_state->selected) {
+            fz_state->offset--;
+        }
         fz_state->selected--;
     }
 }
 
 void fz_state_move_selected_down(FzState *fz_state) {
-    if (fz_state->selected < fz_state->item_list.count) {
+    if (fz_state->selected < fz_state->item_list.count - 1) {
         fz_state->selected++;
+        if (fz_state->selected > fz_state->offset + fz_state->rows_to_be_printed - 1) {
+            fz_state->offset = (fz_state->selected + 1) - fz_state->rows_to_be_printed;
+        }
     }
 }
 
@@ -250,6 +267,7 @@ int main() {
     } else {
         fz_state_load_items_from_pipe(&fz_state);
     }
+    fz_state_calculate_rows(&fz_state);
 
     enter_alternate_buffer(fz_state.tty);
     enable_raw_mode(fz_state.tty_fd);
