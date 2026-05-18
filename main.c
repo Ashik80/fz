@@ -8,18 +8,40 @@
 #include <sys/stat.h>
 #include "term_escapes.h"
 #include "term_mode.h"
+#include "fuzzy.h"
 
 #define INITIAL_CAPACITY 10
 #define EMPTY_ITEM_LIST (ItemList){ .items = NULL, .count = 0, .capacity = 0 }
 
 typedef struct {
-    char **items;
+    char *name;
+    int score;
+} Item;
+
+Item *new_item(char *name) {
+    Item *item = malloc(sizeof(Item));
+    if (!item) {
+        perror("Failed to allocate memory for item");
+        return NULL;
+    }
+    item->name = strdup(name);
+    item->score = 0;
+    return item;
+}
+
+void free_item(Item *item) {
+    free(item->name);
+    free(item);
+}
+
+typedef struct {
+    Item **items;
     size_t count;
     size_t capacity;
 } ItemList;
 
 ItemList new_item_list() {
-    char **items = malloc(sizeof(char *) * INITIAL_CAPACITY);
+    Item **items = malloc(sizeof(Item *) * INITIAL_CAPACITY);
     if (!items) {
         perror("Failed to allocate memory for item list");
         return EMPTY_ITEM_LIST;
@@ -31,10 +53,10 @@ ItemList new_item_list() {
     };
 }
 
-void item_list_add_item(ItemList *item_list, char *item) {
+void item_list_add_item(ItemList *item_list, Item *item) {
     if (item_list->count >= item_list->capacity) {
         item_list->capacity *= 2;
-        char **items = realloc(item_list->items, sizeof(char *) * item_list->capacity);
+        Item **items = realloc(item_list->items, sizeof(Item *) * item_list->capacity);
         if (!items) {
             perror("Failed to allocate memory for item list");
             return;
@@ -47,7 +69,7 @@ void item_list_add_item(ItemList *item_list, char *item) {
 
 void free_item_list(ItemList *item_list) {
     for (size_t i = 0; i < item_list->count; i++) {
-        free(item_list->items[i]);
+        free_item(item_list->items[i]);
     }
     free(item_list->items);
 }
@@ -102,10 +124,12 @@ void fz_state_calculate_rows(FzState *fz_state) {
 
 void fz_state_print_item_list(FzState *fz_state) {
     for (size_t i = fz_state->offset; i <= fz_state->rows_to_be_printed + fz_state->offset - 1; i++) {
-        if (i == fz_state->selected) {
-            fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]);
-        } else {
-            fprintf(fz_state->tty, "  %s\n", fz_state->item_list.items[i]);
+        if (fz_state->item_list.items[i]->score != NO_MATCH) {
+            if (i == fz_state->selected) {
+                fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]->name);
+            } else {
+                fprintf(fz_state->tty, "  %s\n", fz_state->item_list.items[i]->name);
+            }
         }
     }
 }
@@ -116,10 +140,26 @@ void fz_state_print_divider(FzState *fz_state) {
     }
 }
 
+static int cmpitemp(const void *p1, const void *p2)
+{
+    Item *item1 = *(Item **) p1;
+    Item *item2 = *(Item **) p2;
+    return item2->score - item1->score;
+}
+
+void fz_state_fuzzy_sort_item_list(FzState *fz_state) {
+    for (size_t i = 0; i < fz_state->item_list.count; i++) {
+        int score = fuzzy_score(fz_state->item_list.items[i]->name, fz_state->query);
+        fz_state->item_list.items[i]->score = score;
+    }
+    qsort(fz_state->item_list.items, fz_state->item_list.count, sizeof(Item *), cmpitemp);
+}
+
 void render_fz(FzState *fz_state) {
     clear_screen(fz_state->tty);
     fprintf(fz_state->tty, "%s %s\n", fz_state->prompt, fz_state->query);
     fz_state_print_divider(fz_state);
+    fz_state_fuzzy_sort_item_list(fz_state);
     fz_state_print_item_list(fz_state);
     fprintf(fz_state->tty, "\033[1;%zuH", fz_state->cursor);
     fflush(fz_state->tty);
@@ -139,6 +179,8 @@ void fz_state_update_query(FzState *fz_state, char c) {
     fz_state->query[cursor_index] = c;
     fz_state->query[query_len + 1] = '\0';
     fz_state->cursor++;
+    fz_state->selected = 0;
+    fz_state->offset = 0;
 }
 
 void fz_state_query_remove_char_before_cursor(FzState *fz_state) {
@@ -149,6 +191,8 @@ void fz_state_query_remove_char_before_cursor(FzState *fz_state) {
     memmove(&fz_state->query[char_index], &fz_state->query[char_index + 1], last_index - char_index);
     fz_state->query[last_index] = '\0';
     fz_state->cursor--;
+    fz_state->selected = 0;
+    fz_state->offset = 0;
 }
 
 void fz_state_move_cursor_left(FzState *fz_state) {
@@ -181,6 +225,8 @@ void fz_state_query_remove_from_cursor_to_start(FzState *fz_state) {
     memmove(&fz_state->query[0], &fz_state->query[cursor_index], bytes_to_move);
     fz_state->cursor = start_index;
     fz_state->query[bytes_to_move] = '\0';
+    fz_state->selected = 0;
+    fz_state->offset = 0;
 }
 
 void fz_state_query_remove_from_cursor_to_end(FzState *fz_state) {
@@ -188,6 +234,8 @@ void fz_state_query_remove_from_cursor_to_end(FzState *fz_state) {
     size_t cursor_index = fz_state->cursor - prompt_len_with_space;
     if (cursor_index >= strlen(fz_state->query)) return;
     fz_state->query[cursor_index] = '\0';
+    fz_state->selected = 0;
+    fz_state->offset = 0;
 }
 
 void fz_state_move_selected_up(FzState *fz_state) {
@@ -201,11 +249,16 @@ void fz_state_move_selected_up(FzState *fz_state) {
 
 void fz_state_move_selected_down(FzState *fz_state) {
     if (fz_state->selected < fz_state->item_list.count - 1) {
+        if (fz_state->item_list.items[fz_state->selected + 1]->score == NO_MATCH) return;
         fz_state->selected++;
         if (fz_state->selected > fz_state->offset + fz_state->rows_to_be_printed - 1) {
             fz_state->offset = (fz_state->selected + 1) - fz_state->rows_to_be_printed;
         }
     }
+}
+
+char *fz_state_select_from_item(FzState *fz_state) {
+    return strdup(fz_state->item_list.items[fz_state->selected]->name);
 }
 
 void fz_state_load_items_from_pipe(FzState *fz_state) {
@@ -214,7 +267,8 @@ void fz_state_load_items_from_pipe(FzState *fz_state) {
     while (getline(&buf, &buf_len, stdin) != -1) {
         if (buf[strlen(buf) - 1] == '\n')
             buf[strlen(buf) - 1] = '\0';
-        item_list_add_item(&fz_state->item_list, strdup(buf));
+        Item *item = new_item(buf);
+        item_list_add_item(&fz_state->item_list, item);
     }
     free(buf);
 }
@@ -240,7 +294,8 @@ void fz_state_load_items_from_directory(FzState *fz_state, char *base_dir) {
         if (is_directory(path)) {
             fz_state_load_items_from_directory(fz_state, path);
         } else {
-            item_list_add_item(&fz_state->item_list, strdup(path));
+            Item *item = new_item(path);
+            item_list_add_item(&fz_state->item_list, item);
         }
         free(path);
     }
@@ -271,12 +326,27 @@ int main() {
 
     enter_alternate_buffer(fz_state.tty);
     enable_raw_mode(fz_state.tty_fd);
+
     char c;
+    char *result = NULL;
+    int exit_code = 0;
+    int no_items = 0;
+
+    if (fz_state.item_list.count == 0) {
+        no_items = 1;
+        exit_code = 1;
+        goto cleanup;
+    }
+
     while (1) {
         render_fz(&fz_state);
         int res = read(fz_state.tty_fd, &c, 1);
-        if (res == -1) goto cleanup;
+        if (res == -1) {
+            exit_code = 1;
+            goto cleanup;
+        }
         if (c == '\n') {
+            result = fz_state_select_from_item(&fz_state);
             goto cleanup;
         } else if (c == '\033') {
             char c2[2];
@@ -316,6 +386,9 @@ cleanup:
     disable_raw_mode(fz_state.tty_fd);
     exit_alternate_buffer(fz_state.tty);
     free_fz_state(&fz_state);
-    printf("Exited cleanly\n");
-    return 0;
+    if (!no_items) {
+        printf("%s\n", result);
+    }
+    free(result);
+    return exit_code;
 }
