@@ -13,6 +13,7 @@
 #include "fuzzy.h"
 
 #define INITIAL_CAPACITY 10
+#define PROMPT_FL "-p"
 #define EMPTY_ITEM_LIST (ItemList){ .items = NULL, .count = 0, .capacity = 0 }
 
 typedef struct {
@@ -129,6 +130,11 @@ void free_fz_state(FzState *fz_state) {
     free(fz_state->prompt);
     free(fz_state->query);
     fclose(fz_state->tty);
+}
+
+void fz_state_add_prompt_text(FzState *fz_state, char *prompt) {
+    fz_state->prompt = prompt;
+    fz_state->cursor = strlen(prompt) + strlen(fz_state->query) + 2;
 }
 
 int fz_state_calculate_rows(FzState *fz_state) {
@@ -408,10 +414,26 @@ void exit_early(int sig) {
     exit(0);
 }
 
-int main() {
+int main(int argc, char **argv) {
     signal(SIGINT, exit_early);
 
+    char *prompt = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], PROMPT_FL) == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Missing argument for -p\n");
+                exit(1);
+            }
+            prompt = argv[i + 1];
+            break;
+        }
+    }
+
     fz_state = new_fz_state();
+    if (prompt) {
+        free(fz_state.prompt);
+        fz_state_add_prompt_text(&fz_state, strdup(prompt));
+    }
 
     enter_alternate_buffer(fz_state.tty);
     enable_raw_mode(fz_state.tty_fd);
@@ -457,7 +479,6 @@ int main() {
             char pc;
             read(fz_state.pipefd[0], &pc, 1);
             continue;
-        } else if (FD_ISSET(fz_state.tty_fd, &fds)) {
         }
 
         int res = read(fz_state.tty_fd, &c, 1);

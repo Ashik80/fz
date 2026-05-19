@@ -5,6 +5,8 @@ leak_check:
 	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz
 	@printf "some\nthing\nanother\n" | valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz
 	@cd empty_dir && valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ../fz
+	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz -p "Files>"
+	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz -p
 
 install: build
 	@cp fz /usr/local/bin/fz
