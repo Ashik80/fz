@@ -7,11 +7,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <sys/select.h>
 #include "term_escapes.h"
 #include "term_mode.h"
 #include "fuzzy.h"
 
-#define FRAME_SIZE 234234
 #define INITIAL_CAPACITY 10
 #define EMPTY_ITEM_LIST (ItemList){ .items = NULL, .count = 0, .capacity = 0 }
 
@@ -78,12 +78,11 @@ void free_item_list(ItemList *item_list) {
 
 typedef struct {
     ItemList item_list;
+    int pipefd[2];
     char *prompt;
     char *query;
-    char frame[FRAME_SIZE];
     FILE *tty;
     size_t cursor;
-    size_t frame_size;
     int tty_fd;
     int selected;
     int offset;
@@ -92,6 +91,7 @@ typedef struct {
     int cols;
     int loading_done;
     pthread_t list_loader_thread;
+    pthread_t list_sorter_thread;
     pthread_mutex_t list_modifier_mutex;
     pthread_cond_t list_modifier_cond;
 } FzState;
@@ -110,7 +110,6 @@ FzState new_fz_state() {
         .item_list = new_item_list(),
         .tty = tty,
         .cursor = cursor,
-        .frame_size = 0,
         .tty_fd = tty_fd,
         .selected = 0,
         .offset = 0,
@@ -118,6 +117,8 @@ FzState new_fz_state() {
         .rows_to_be_printed = 0,
         .cols = w.ws_col,
         .loading_done = 0,
+        .list_loader_thread = 0,
+        .list_sorter_thread = 0,
         .list_modifier_mutex = PTHREAD_MUTEX_INITIALIZER,
         .list_modifier_cond = PTHREAD_COND_INITIALIZER
     };
@@ -139,18 +140,31 @@ void fz_state_print_item_list(FzState *fz_state) {
     int rows_to_be_printed = fz_state_calculate_rows(fz_state);
     for (size_t i = fz_state->offset; i <= rows_to_be_printed + fz_state->offset - 1; i++) {
         if (fz_state->item_list.items[i]->score != NO_MATCH) {
-            if (i == fz_state->selected) {
-                fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]->name);
-            } else {
-                fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "  %s\n", fz_state->item_list.items[i]->name);
+            int cols = fz_state->cols - 3;
+            size_t len = strlen(fz_state->item_list.items[i]->name);
+            char *copied_name = strdup(fz_state->item_list.items[i]->name);
+            char *text = copied_name;
+            size_t diff = 0;
+            if (len > cols) {
+                diff = len - cols;
+                text = copied_name + diff;
+                text[0] = '.';
+                text[1] = '.';
+                text[2] = '.';
             }
+            if (i == fz_state->selected) {
+                fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", text);
+            } else {
+                fprintf(fz_state->tty, "  %s\n", text);
+            }
+            free(copied_name);
         }
     }
 }
 
 void fz_state_print_divider(FzState *fz_state) {
     for (int i = 0; i < fz_state->cols; i++) {
-        fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "—");
+        fprintf(fz_state->tty, "—");
     }
 }
 
@@ -168,15 +182,21 @@ void fz_state_fuzzy_sort_item_list(FzState *fz_state) {
     qsort(fz_state->item_list.items, fz_state->item_list.count, sizeof(Item *), cmpitemp);
 }
 
+void *fuzzy_sort_item_in_thread(void *args) {
+    FzState *fz_state = (FzState *)args;
+    pthread_mutex_lock(&fz_state->list_modifier_mutex);
+    fz_state_fuzzy_sort_item_list(fz_state);
+    pthread_mutex_unlock(&fz_state->list_modifier_mutex);
+    write(fz_state->pipefd[1], "x", 1);
+    return NULL;
+}
+
 void fz_state_render(FzState *fz_state) {
     clear_screen(fz_state->tty);
-    fz_state->frame_size = 0;
-    fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "%s %s\n", fz_state->prompt, fz_state->query);
+    fprintf(fz_state->tty, "%s %s\n", fz_state->prompt, fz_state->query);
     fz_state_print_divider(fz_state);
-    fz_state_fuzzy_sort_item_list(fz_state);
     fz_state_print_item_list(fz_state);
-    fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "\033[1;%zuH", fz_state->cursor);
-    fwrite(fz_state->frame, 1, fz_state->frame_size, fz_state->tty);
+    fprintf(fz_state->tty, "\033[1;%zuH", fz_state->cursor);
     fflush(fz_state->tty);
 }
 
@@ -196,6 +216,11 @@ void fz_state_update_query(FzState *fz_state, char c) {
     fz_state->cursor++;
     fz_state->selected = 0;
     fz_state->offset = 0;
+    if (fz_state->list_sorter_thread) {
+        pthread_join(fz_state->list_sorter_thread, NULL);
+        fz_state->list_sorter_thread = 0;
+    }
+    pthread_create(&fz_state->list_sorter_thread, NULL, fuzzy_sort_item_in_thread, fz_state);
 }
 
 void fz_state_query_remove_char_before_cursor(FzState *fz_state) {
@@ -372,6 +397,10 @@ void exit_early(int sig) {
         pthread_cancel(fz_state.list_loader_thread);
         pthread_join(fz_state.list_loader_thread, NULL);
     }
+    if (fz_state.list_sorter_thread) {
+        pthread_cancel(fz_state.list_sorter_thread);
+        pthread_join(fz_state.list_sorter_thread, NULL);
+    }
     disable_raw_mode(fz_state.tty_fd);
     exit_alternate_buffer(fz_state.tty);
     free_fz_state(&fz_state);
@@ -398,6 +427,7 @@ int main() {
     char *result = NULL;
     int exit_code = 0;
     int no_items = 0;
+    pipe(fz_state.pipefd);
 
     pthread_mutex_lock(&fz_state.list_modifier_mutex);
     while (!fz_state.loading_done) {
@@ -416,6 +446,20 @@ int main() {
         pthread_mutex_lock(&fz_state.list_modifier_mutex);
         fz_state_render(&fz_state);
         pthread_mutex_unlock(&fz_state.list_modifier_mutex);
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fz_state.tty_fd, &fds);
+        FD_SET(fz_state.pipefd[0], &fds);
+        int max_fd = (fz_state.tty_fd > fz_state.pipefd[0] ? fz_state.tty_fd : fz_state.pipefd[0]) + 1;
+        select(max_fd, &fds, NULL, NULL, NULL);
+        if (FD_ISSET(fz_state.pipefd[0], &fds)) {
+            char pc;
+            read(fz_state.pipefd[0], &pc, 1);
+            continue;
+        } else if (FD_ISSET(fz_state.tty_fd, &fds)) {
+        }
+
         int res = read(fz_state.tty_fd, &c, 1);
         if (res == -1) {
             exit_code = 1;
@@ -472,6 +516,10 @@ cleanup:
     if (fz_state.list_loader_thread) {
         pthread_cancel(fz_state.list_loader_thread);
         pthread_join(fz_state.list_loader_thread, NULL);
+    }
+    if (fz_state.list_sorter_thread) {
+        pthread_cancel(fz_state.list_sorter_thread);
+        pthread_join(fz_state.list_sorter_thread, NULL);
     }
     disable_raw_mode(fz_state.tty_fd);
     exit_alternate_buffer(fz_state.tty);
