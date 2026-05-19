@@ -410,7 +410,6 @@ void exit_early(int sig) {
     disable_raw_mode(fz_state.tty_fd);
     exit_alternate_buffer(fz_state.tty);
     free_fz_state(&fz_state);
-    printf("Exited early with signal %d\n", sig);
     exit(0);
 }
 
