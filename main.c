@@ -11,6 +11,7 @@
 #include "term_mode.h"
 #include "fuzzy.h"
 
+#define FRAME_SIZE 234234
 #define INITIAL_CAPACITY 10
 #define EMPTY_ITEM_LIST (ItemList){ .items = NULL, .count = 0, .capacity = 0 }
 
@@ -79,8 +80,10 @@ typedef struct {
     ItemList item_list;
     char *prompt;
     char *query;
+    char frame[FRAME_SIZE];
     FILE *tty;
     size_t cursor;
+    size_t frame_size;
     int tty_fd;
     int selected;
     int offset;
@@ -107,10 +110,11 @@ FzState new_fz_state() {
         .item_list = new_item_list(),
         .tty = tty,
         .cursor = cursor,
+        .frame_size = 0,
         .tty_fd = tty_fd,
         .selected = 0,
         .offset = 0,
-        .rows = w.ws_row - 4,
+        .rows = w.ws_row - 3,
         .rows_to_be_printed = 0,
         .cols = w.ws_col,
         .loading_done = 0,
@@ -136,9 +140,9 @@ void fz_state_print_item_list(FzState *fz_state) {
     for (size_t i = fz_state->offset; i <= rows_to_be_printed + fz_state->offset - 1; i++) {
         if (fz_state->item_list.items[i]->score != NO_MATCH) {
             if (i == fz_state->selected) {
-                fprintf(fz_state->tty, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]->name);
+                fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "\033[1m> %s\033[0m\n", fz_state->item_list.items[i]->name);
             } else {
-                fprintf(fz_state->tty, "  %s\n", fz_state->item_list.items[i]->name);
+                fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "  %s\n", fz_state->item_list.items[i]->name);
             }
         }
     }
@@ -146,7 +150,7 @@ void fz_state_print_item_list(FzState *fz_state) {
 
 void fz_state_print_divider(FzState *fz_state) {
     for (int i = 0; i < fz_state->cols; i++) {
-        fprintf(fz_state->tty, "—");
+        fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "—");
     }
 }
 
@@ -166,12 +170,13 @@ void fz_state_fuzzy_sort_item_list(FzState *fz_state) {
 
 void fz_state_render(FzState *fz_state) {
     clear_screen(fz_state->tty);
-    fprintf(fz_state->tty, "%s %s\n", fz_state->prompt, fz_state->query);
+    fz_state->frame_size = 0;
+    fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "%s %s\n", fz_state->prompt, fz_state->query);
     fz_state_print_divider(fz_state);
     fz_state_fuzzy_sort_item_list(fz_state);
-    fprintf(fz_state->tty, "Rows: %d\n", fz_state->rows);
     fz_state_print_item_list(fz_state);
-    fprintf(fz_state->tty, "\033[1;%zuH", fz_state->cursor);
+    fz_state->frame_size += snprintf(fz_state->frame + fz_state->frame_size, FRAME_SIZE - fz_state->frame_size, "\033[1;%zuH", fz_state->cursor);
+    fwrite(fz_state->frame, 1, fz_state->frame_size, fz_state->tty);
     fflush(fz_state->tty);
 }
 
