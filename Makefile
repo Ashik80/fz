@@ -1,5 +1,5 @@
 build:
-	@gcc fuzzy.c term_escapes.c term_mode.c main.c -o fz
+	@gcc item_list.c fuzzy.c term_escapes.c term_mode.c main.c -o fz
 
 leak_check:
 	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fz

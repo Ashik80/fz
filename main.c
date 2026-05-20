@@ -8,74 +8,12 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <sys/select.h>
+#include "item_list.h"
 #include "term_escapes.h"
 #include "term_mode.h"
 #include "fuzzy.h"
 
-#define INITIAL_CAPACITY 10
 #define PROMPT_FL "-p"
-#define EMPTY_ITEM_LIST (ItemList){ .items = NULL, .count = 0, .capacity = 0 }
-
-typedef struct {
-    char *name;
-    int score;
-} Item;
-
-Item *new_item(char *name) {
-    Item *item = malloc(sizeof(Item));
-    if (!item) {
-        perror("Failed to allocate memory for item");
-        return NULL;
-    }
-    item->name = strdup(name);
-    item->score = 0;
-    return item;
-}
-
-void free_item(Item *item) {
-    free(item->name);
-    free(item);
-}
-
-typedef struct {
-    Item **items;
-    size_t count;
-    size_t capacity;
-} ItemList;
-
-ItemList new_item_list() {
-    Item **items = malloc(sizeof(Item *) * INITIAL_CAPACITY);
-    if (!items) {
-        perror("Failed to allocate memory for item list");
-        return EMPTY_ITEM_LIST;
-    }
-    return (ItemList) {
-        .items = items,
-        .count = 0,
-        .capacity = INITIAL_CAPACITY
-    };
-}
-
-void item_list_add_item(ItemList *item_list, Item *item) {
-    if (item_list->count >= item_list->capacity) {
-        item_list->capacity *= 2;
-        Item **items = realloc(item_list->items, sizeof(Item *) * item_list->capacity);
-        if (!items) {
-            perror("Failed to allocate memory for item list");
-            return;
-        }
-        item_list->items = items;
-    }
-    item_list->items[item_list->count] = item;
-    item_list->count++;
-}
-
-void free_item_list(ItemList *item_list) {
-    for (size_t i = 0; i < item_list->count; i++) {
-        free_item(item_list->items[i]);
-    }
-    free(item_list->items);
-}
 
 typedef struct {
     ItemList item_list;
@@ -239,6 +177,11 @@ void fz_state_query_remove_char_before_cursor(FzState *fz_state) {
     fz_state->cursor--;
     fz_state->selected = 0;
     fz_state->offset = 0;
+    if (fz_state->list_sorter_thread) {
+        pthread_join(fz_state->list_sorter_thread, NULL);
+        fz_state->list_sorter_thread = 0;
+    }
+    pthread_create(&fz_state->list_sorter_thread, NULL, fuzzy_sort_item_in_thread, fz_state);
 }
 
 void fz_state_move_cursor_left(FzState *fz_state) {
@@ -350,7 +293,6 @@ void fz_state_load_items_from_directory(FzState *fz_state, char *base_dir) {
     DIR *dir = opendir(base_dir);
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        // if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 || strcmp(entry->d_name, ".git") == 0)
             continue;
         size_t path_len = strlen(base_dir) + strlen(entry->d_name) + 2;
@@ -525,7 +467,7 @@ int main(int argc, char **argv) {
             fz_state_query_remove_from_cursor_to_start(&fz_state);
         } else if (c == 0x0B) { // ctrl-k
             fz_state_query_remove_from_cursor_to_end(&fz_state);
-        } else if (c == 127) {
+        } else if (c == 127) { // backspace
             fz_state_query_remove_char_before_cursor(&fz_state);
         } else {
             fz_state_update_query(&fz_state, c);
