@@ -161,6 +161,7 @@ void fz_state_update_query(FzState *fz_state, char c) {
     fz_state->selected = 0;
     fz_state->offset = 0;
     if (fz_state->list_sorter_thread) {
+        pthread_cancel(fz_state->list_sorter_thread);
         pthread_join(fz_state->list_sorter_thread, NULL);
         fz_state->list_sorter_thread = 0;
     }
@@ -178,6 +179,7 @@ void fz_state_query_remove_char_before_cursor(FzState *fz_state) {
     fz_state->selected = 0;
     fz_state->offset = 0;
     if (fz_state->list_sorter_thread) {
+        pthread_cancel(fz_state->list_sorter_thread);
         pthread_join(fz_state->list_sorter_thread, NULL);
         fz_state->list_sorter_thread = 0;
     }
